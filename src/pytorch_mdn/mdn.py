@@ -22,7 +22,7 @@ ACTIVATION_FUNCTIONS = {
 }
 
 
-class ELUPlus1(nn.ELU):
+class ElevatedELU(nn.ELU):
     """ELU activation shifted upwards by 1 to get strictly positive outputs."""
 
     def __init__(self):
@@ -91,7 +91,7 @@ class MixtureDensityNetwork(nn.Module):
             nn.Linear(prev_dim, self.n_components * output_dim), nn.Softplus()
         )
         self.sigma_layer = nn.Sequential(
-            nn.Linear(prev_dim, self.n_components), ELUPlus1()
+            nn.Linear(prev_dim, self.n_components), ElevatedELU()
         )
 
     def forward(self, x: TorchTensor) -> tuple[TorchTensor, TorchTensor, TorchTensor]:
