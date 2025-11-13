@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import math
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch import Tensor as TorchTensor
+
+if TYPE_CHECKING:
+    from numpy.typing import ArrayLike
+
 
 LOG_2PI = math.log(2.0 * math.pi)
 
@@ -44,6 +48,8 @@ class MixtureDensityNetwork(nn.Module):
     activation : {"gelu", "relu", "mish", "silu"}
         Activation function name.
     """
+
+    # ToDo: Add option for different activation functions for mu layer
 
     def __init__(
         self,
@@ -93,16 +99,16 @@ class MixtureDensityNetwork(nn.Module):
 
         Parameters
         ----------
-        x : TorchTensor, shape (batch_size, input_dim)
+        x : Tensor of shape (batch_size, input_dim)
             Input tensor.
 
         Returns
         -------
-        pi : TorchTensor, shape (batch_size, n_components)
+        pi : Tensor of shape (batch_size, n_components)
             Mixture weights.
-        mu : TorchTensor, shape (batch_size, n_components, output_dim)
-            Component means.
-        sigma : TorchTensor, shape (batch_size, n_components)
+        mu : Tensor of shape (batch_size, n_components, output_dim)
+            Component means (i.e., centers).
+        sigma : Tensor of shape (batch_size, n_components)
             Component standard deviations.
         """
         h = self.backbone(x)
@@ -112,19 +118,19 @@ class MixtureDensityNetwork(nn.Module):
         return pi, mu, sigma
 
     @torch.inference_mode()
-    def sample(self, x: TorchTensor, n_samples: int = 100) -> TorchTensor:
-        """Sample from the mixture distribution.
+    def generate_samples(self, x: TorchTensor, n_samples: int = 100) -> TorchTensor:
+        """Generate random samples from the mixture distribution.
 
         Parameters
         ----------
-        x : TorchTensor, shape (batch_size, input_dim)
+        x : Tensor of shape (batch_size, input_dim)
             Input tensor.
         n_samples : int, default=100
             Number of samples to draw per batch element.
 
         Returns
         -------
-        samples : TorchTensor, shape (batch_size, n_samples, output_dim)
+        samples : Tensor of shape (batch_size, n_samples, output_dim)
             Samples from the mixture distribution.
         """
         pi, mu, sigma = self.forward(x)
@@ -134,11 +140,11 @@ class MixtureDensityNetwork(nn.Module):
         component_dist = torch.distributions.Categorical(pi)
         component_idxs = component_dist.sample((n_samples,)).T  # (B, N)
 
-        batch_indices = (
+        batch_idxs = (
             torch.arange(batch_size, device=x.device).unsqueeze(1).expand(-1, n_samples)
         )
-        sampled_mu = mu[batch_indices, component_idxs]  # (B, N, D_out)
-        sampled_sigma = sigma[batch_indices, component_idxs]  # (B, N)
+        sampled_mu = mu[batch_idxs, component_idxs]  # (B, N, D_out)
+        sampled_sigma = sigma[batch_idxs, component_idxs]  # (B, N)
 
         noise = torch.randn_like(sampled_mu)
         return sampled_mu + sampled_sigma.unsqueeze(-1) * noise
@@ -147,35 +153,58 @@ class MixtureDensityNetwork(nn.Module):
     def predict(
         self,
         x: TorchTensor,
-        inference_type: Literal["mode", "mean", "sample"],
+        inference_type: Literal[
+            "sample_mean", "sample_median", "weighted_mean", "argmax_mean"
+        ],
+        n_samples: int = 100,
     ) -> TorchTensor:
         """Generate predictions from the mixture distribution.
 
         Parameters
         ----------
-        x : TorchTensor, shape (batch_size, input_dim)
+        x : Tensor of shape (batch_size, input_dim)
             Input tensor.
-        inference_type : {"mode", "mean", "sample"}
+
+        inference_type : {"sample_mean", "sample_median", "weighted_mean", "argmax_mean"}
             Type of prediction to generate:
-            - "mode": Mean of the most probable component
-            - "mean": Weighted average of all component means
-            - "sample": Single sample from the distribution
+            - "sample_mean":
+                Mean of samples drawn from the mixture distribution.
+            - "sample_median":
+                Median of samples drawn from the mixture distribution.
+            - "weighted_mean":
+                Expected value E[Y|X] computed as weighted average of component
+                means.
+              of the mixture distribution.
+            - "argmax_mean":
+                Mean of the most probable component (i.e., component with
+                highest mixing weight). Fast approximation that works well when
+                one component dominates, but may be inaccurate when components
+                overlap significantly.
+
+        n_samples : int, default=100
+            Number of samples to draw when using "sample_mean" or
+            "sample_median" inference types.
 
         Returns
         -------
-        predictions : TorchTensor, shape (batch_size, output_dim)
+        preds : Tensor of shape (batch_size, output_dim)
             Predicted values based on the selected inference type.
-        """
-        if inference_type == "sample":
-            return self.sample(x, n_samples=1).squeeze(1)
+        """  # noqa: W505, E501
+        if inference_type in ("sample_mean", "sample_median"):
+            samples = self.generate_samples(x, n_samples=n_samples)  # (B, N, D_out)
+            return (
+                samples.mean(dim=1)
+                if inference_type == "sample_mean"
+                else samples.median(dim=1).values
+            )  # (B, D_out)
 
         pi, mu, _ = self.forward(x)
 
-        if inference_type == "mean":
-            # Weighted average of all component means
+        if inference_type == "weighted_mean":
+            # Weighted average of all component means, E[Y|X=x]
             return torch.sum(pi.unsqueeze(-1) * mu, dim=1)
         else:
-            # inference_type == "mode":
+            # inference_type == "argmax_mean"
             # Mean of the most probable component
             most_probable_idxs = pi.argmax(dim=-1)  # (B,)
             batch_idxs = torch.arange(most_probable_idxs.shape[0], device=x.device)
@@ -183,40 +212,31 @@ class MixtureDensityNetwork(nn.Module):
 
     @torch.inference_mode()
     def predict_quantiles(
-        self, x: TorchTensor, quantiles: list[float], n_samples: int = 100
+        self, x: TorchTensor, quantiles: ArrayLike[float], n_samples: int = 100
     ) -> dict[str, TorchTensor]:
         """Compute quantile predictions from the mixture distribution.
 
         Parameters
         ----------
-        x : TorchTensor, shape (batch_size, input_dim)
+        x : Tensor of shape (batch_size, input_dim)
             Input tensor.
         quantiles : list[float]
-            List of quantile values to compute. Each value must be in the
-            range (0, 1).
+            List of quantile values to compute, each between 0 and 1.
         n_samples : int, default=100
             Number of samples to draw for quantile estimation.
 
         Returns
         -------
-        results : dict[str, TorchTensor]
-            Dictionary with key-value pairs:
-            - "samples" -> TorchTensor, shape (batch_size, n_samples, output_dim)
-              All samples from the distribution
-            - "q_{q}" -> TorchTensor, shape (batch_size, output_dim)
-              Quantile predictions for each quantile value in `quantiles`.
-        """  # noqa: W505
-        q_vals = np.array(quantiles)
-        if not np.all((q_vals > 0) & (q_vals < 1)):
+        results : dict[str, Tensor]
+            Dictionary with keys as "q_{quantile}" and values as Tensors of
+            shape (batch_size, output_dim) containing the estimated quantiles.
+        """
+        quantiles = np.asarray(quantiles)
+        if not np.all((quantiles > 0) & (quantiles < 1)):
             raise ValueError("Quantiles must be between 0 and 1.")
 
-        samples = self.sample(x, n_samples)  # (B, N, D_out)
-        results = {"samples": samples}
-
-        for q in q_vals:
-            results[f"q_{q}"] = samples.quantile(q, dim=1)  # (B, D_out)
-
-        return results
+        samples = self.generate_samples(x, n_samples)  # (B, N, D_out)
+        return {f"q_{q}": samples.quantile(q, dim=1) for q in quantiles}
 
 
 def mdn_loss(
@@ -230,18 +250,18 @@ def mdn_loss(
 
     Parameters
     ----------
-    pi : TorchTensor, shape (batch_size, n_components)
+    pi : Tensor of shape (batch_size, n_components)
         Mixture weights.
-    mu : TorchTensor, shape (batch_size, n_components, output_dim)
+    mu : Tensor of shape (batch_size, n_components, output_dim)
         Component means.
-    sigma : TorchTensor, shape (batch_size, n_components)
+    sigma : Tensor of shape (batch_size, n_components)
         Component standard deviations.
-    target : TorchTensor, shape (batch_size, output_dim)
+    target : Tensor of shape (batch_size, output_dim)
         Target values.
 
     Returns
     -------
-    loss : TorchTensor
+    loss : Tensor
         Scalar negative log-likelihood loss. This value can be negative when
         the model assigns high probability density to the targets, which is
         valid behavior for *continuous* distributions.
