@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -11,8 +10,6 @@ from torch import Tensor as TorchTensor
 if TYPE_CHECKING:
     from numpy.typing import ArrayLike
 
-
-LOG_2PI = math.log(2.0 * math.pi)
 
 ACTIVATION_FUNCTIONS = {
     "relu": nn.ReLU,
@@ -45,8 +42,10 @@ class MixtureDensityNetwork(nn.Module):
         Dimension of output targets
     n_components : int
         Number of mixture components in the output distribution
-    activation : {"gelu", "relu", "mish", "silu"}
+    activation_type : {"gelu", "relu", "mish", "silu"}
         Activation function name.
+    bn_after_act : bool, default=False
+        Whether to apply batch normalization after activation functions.
     """
 
     # ToDo: Add option for different activation functions for mu layer
@@ -57,7 +56,8 @@ class MixtureDensityNetwork(nn.Module):
         hidden_dims: list[int] | int,
         output_dim: int,
         n_components: int,
-        activation: str,
+        activation_type: str,
+        bn_after_act: bool = False,
     ) -> None:
         super().__init__()
         self.input_dim: int = input_dim
@@ -68,16 +68,16 @@ class MixtureDensityNetwork(nn.Module):
             hidden_dims = [hidden_dims]
         self.hidden_dims: list[int] = hidden_dims
 
-        activation_fn = ACTIVATION_FUNCTIONS.get(activation.lower(), nn.GELU)
+        activation_fn = ACTIVATION_FUNCTIONS.get(activation_type.lower(), nn.GELU)
 
         layers = []
         prev_dim = self.input_dim
         for hidden_dim in self.hidden_dims:
-            block = [
-                nn.Linear(prev_dim, hidden_dim),
-                nn.BatchNorm1d(hidden_dim),
-                activation_fn(),
-            ]
+            block = [nn.Linear(prev_dim, hidden_dim), activation_fn()]
+            if bn_after_act:
+                block.append(nn.BatchNorm1d(hidden_dim))
+            else:
+                block.insert(1, nn.BatchNorm1d(hidden_dim))
 
             layers.extend(block)
             prev_dim = hidden_dim
@@ -173,8 +173,7 @@ class MixtureDensityNetwork(nn.Module):
                 Median of samples drawn from the mixture distribution.
             - "weighted_mean":
                 Expected value E[Y|X] computed as weighted average of component
-                means.
-              of the mixture distribution.
+                means of the mixture distribution.
             - "argmax_mean":
                 Mean of the most probable component (i.e., component with
                 highest mixing weight). Fast approximation that works well when
@@ -237,47 +236,3 @@ class MixtureDensityNetwork(nn.Module):
 
         samples = self.generate_samples(x, n_samples)  # (B, N, D_out)
         return {f"q_{q}": samples.quantile(q, dim=1) for q in quantiles}
-
-
-def mdn_loss(
-    pi: TorchTensor, mu: TorchTensor, sigma: TorchTensor, target: TorchTensor
-) -> TorchTensor:
-    """Compute negative log-likelihood loss for Mixture Density Network.
-
-    This loss assumes a spherical Gaussian for each mixture component (i.e.,
-    the same standard deviation across all output dimensions within each
-    component).
-
-    Parameters
-    ----------
-    pi : Tensor of shape (batch_size, n_components)
-        Mixture weights.
-    mu : Tensor of shape (batch_size, n_components, output_dim)
-        Component means.
-    sigma : Tensor of shape (batch_size, n_components)
-        Component standard deviations.
-    target : Tensor of shape (batch_size, output_dim)
-        Target values.
-
-    Returns
-    -------
-    loss : Tensor
-        Scalar negative log-likelihood loss. This value can be negative when
-        the model assigns high probability density to the targets, which is
-        valid behavior for *continuous* distributions.
-    """
-    output_dim = mu.shape[-1]
-    assert target.shape[-1] == output_dim, "Output dimension mismatch."
-
-    target_expanded = target.unsqueeze(1).expand_as(mu)
-
-    sigma_clamped = sigma.clamp(min=1e-7)
-    log_probs = (
-        -0.5 * output_dim * LOG_2PI
-        - output_dim * sigma_clamped.log()
-        - (target_expanded - mu).pow(2).sum(dim=-1) / (2.0 * sigma_clamped.pow(2))
-    )
-    weighted_log_probs = pi.clamp(min=1e-8).log() + log_probs
-
-    # Negative log-likelihood
-    return -1.0 * weighted_log_probs.logsumexp(dim=-1).mean()
