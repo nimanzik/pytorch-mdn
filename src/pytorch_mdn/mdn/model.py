@@ -85,7 +85,7 @@ class MixtureDensityNetwork(nn.Module):
         self.backbone = nn.Sequential(*layers)
 
         self.pi_layer = nn.Sequential(
-            nn.Linear(prev_dim, self.n_components), nn.Softmax(dim=-1)
+            nn.Linear(prev_dim, self.n_components), nn.LogSoftmax(dim=-1)
         )
         self.mu_layer = nn.Sequential(
             nn.Linear(prev_dim, self.n_components * output_dim), nn.Softplus()
@@ -104,18 +104,18 @@ class MixtureDensityNetwork(nn.Module):
 
         Returns
         -------
-        pi : Tensor of shape (batch_size, n_components)
-            Mixture weights.
+        log_pi : Tensor of shape (batch_size, n_components)
+            Log of mixture weights.
         mu : Tensor of shape (batch_size, n_components, output_dim)
             Component means (i.e., centers).
         sigma : Tensor of shape (batch_size, n_components)
             Component standard deviations.
         """
         h = self.backbone(x)
-        pi = self.pi_layer(h)
+        log_pi = self.pi_layer(h)
         mu = self.mu_layer(h).view(-1, self.n_components, self.output_dim)
         sigma = self.sigma_layer(h).view(-1, self.n_components)
-        return pi, mu, sigma
+        return log_pi, mu, sigma
 
     @torch.inference_mode()
     def generate_samples(self, x: TorchTensor, n_samples: int = 100) -> TorchTensor:
@@ -133,7 +133,8 @@ class MixtureDensityNetwork(nn.Module):
         samples : Tensor of shape (batch_size, n_samples, output_dim)
             Samples from the mixture distribution.
         """
-        pi, mu, sigma = self.forward(x)
+        log_pi, mu, sigma = self.forward(x)
+        pi = log_pi.exp()  # Convert log probabilities to probabilities
         batch_size = x.shape[0]
 
         # Vectorized sampling
@@ -197,7 +198,8 @@ class MixtureDensityNetwork(nn.Module):
                 else samples.median(dim=1).values
             )  # (B, D_out)
 
-        pi, mu, _ = self.forward(x)
+        log_pi, mu, _ = self.forward(x)
+        pi = log_pi.exp()  # Convert log probabilities to probabilities
 
         if inference_type == "weighted_mean":
             # Weighted average of all component means, E[Y|X=x]
@@ -211,7 +213,7 @@ class MixtureDensityNetwork(nn.Module):
 
     @torch.inference_mode()
     def predict_quantiles(
-        self, x: TorchTensor, quantiles: ArrayLike[float], n_samples: int = 100
+        self, x: TorchTensor, quantiles: ArrayLike, n_samples: int = 100
     ) -> dict[str, TorchTensor]:
         """Compute quantile predictions from the mixture distribution.
 

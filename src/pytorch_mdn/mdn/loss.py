@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 
 
 def mdn_loss(
-    pi: TorchTensor, mu: TorchTensor, sigma: TorchTensor, target: TorchTensor
+    log_pi: TorchTensor, mu: TorchTensor, sigma: TorchTensor, target: TorchTensor
 ) -> TorchTensor:
     """Compute negative log-likelihood loss for Mixture Density Network.
 
@@ -18,8 +18,8 @@ def mdn_loss(
 
     Parameters
     ----------
-    pi : Tensor of shape (batch_size, n_components)
-        Mixture weights.
+    log_pi : Tensor of shape (batch_size, n_components)
+        Log of mixture weights.
     mu : Tensor of shape (batch_size, n_components, output_dim)
         Component means.
     sigma : Tensor of shape (batch_size, n_components)
@@ -45,7 +45,7 @@ def mdn_loss(
         - output_dim * sigma_clamped.log()
         - (target_expanded - mu).pow(2).sum(dim=-1) / (2.0 * sigma_clamped.pow(2))
     )
-    weighted_log_probs = pi.clamp(min=1e-8).log() + log_probs
+    weighted_log_probs = log_pi + log_probs
 
     # Negative log-likelihood
     return -1.0 * weighted_log_probs.logsumexp(dim=-1).mean()
