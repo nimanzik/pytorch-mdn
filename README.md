@@ -55,11 +55,11 @@ model = MixtureDensityNetwork(
 
 # Forward pass: get mixture parameters
 x = torch.randn(batch_size, input_dim)
-pi, mu, sigma = model(x)
+log_pi, mu, sigma = model(x)
 
 # Compute loss
 y_true = torch.randn(batch_size, output_dim)
-loss = mdn_loss(pi, mu, sigma, y_true)
+loss = mdn_loss(log_pi, mu, sigma, y_true)
 
 # Generate predictions
 predictions = model.predict(x, inference_type="sample_median")
