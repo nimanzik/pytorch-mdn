@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
+from ..mixup_config import MixUpConfig
 from ..scheduler_config import SchedulerConfig
 
 if TYPE_CHECKING:
@@ -33,6 +34,9 @@ class MDNTrainingConfig(BaseModel, extra="forbid"):
     )
     scheduler_config: SchedulerConfig | None = Field(
         default=None, description="Learning-rate scheduler configuration"
+    )
+    mixup_config: MixUpConfig | None = Field(
+        default=None, description="MixUp augmentation configuration"
     )
 
     @field_validator("hidden_dims", mode="before")
