@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from torch import Tensor as TorchTensor
     from torch.optim import Optimizer
 
+    from ..mixup_config import MixUpConfig
     from ..scheduler_config import SchedulerConfig
     from .config import MDNTrainingConfig
 
@@ -31,6 +32,7 @@ class MDNLitModule(LightningModule):
         learning_rate: float = 1e-3,
         weight_decay: float = 0.0,
         scheduler_config: SchedulerConfig | None = None,
+        mixup_config: MixUpConfig | None = None,
     ) -> None:
         super().__init__()
 
@@ -51,6 +53,7 @@ class MDNLitModule(LightningModule):
         self.learning_rate: float = learning_rate
         self.weight_decay: float = weight_decay
         self.scheduler_config: SchedulerConfig | None = scheduler_config
+        self.mixup_config: MixUpConfig | None = mixup_config
 
     @classmethod
     def from_config(cls, config: MDNTrainingConfig) -> MDNLitModule:
@@ -72,6 +75,7 @@ class MDNLitModule(LightningModule):
             learning_rate=config.learning_rate,
             weight_decay=config.weight_decay,
             scheduler_config=config.scheduler_config,
+            mixup_config=config.mixup_config,
         )
 
     def forward(self, x: TorchTensor) -> tuple[TorchTensor, TorchTensor, TorchTensor]:
@@ -84,8 +88,8 @@ class MDNLitModule(LightningModule):
 
         Returns
         -------
-        pi : Tensor
-            Mixture weights.
+        log_pi : Tensor
+            Log of mixture weights (log probabilities).
         mu : Tensor
             Component means.
         sigma : Tensor
@@ -108,6 +112,11 @@ class MDNLitModule(LightningModule):
             Training loss for the batch.
         """
         x, y = batch
+
+        # Apply MixUp if configured
+        if self.mixup_config is not None:
+            x, y = self.mixup_config.apply_mixup(x, y)
+
         loss = self._compute_loss(x, y)
         self.log(
             "train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True
