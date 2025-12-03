@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 import torch
 import torch.nn as nn
+from pydantic import BaseModel, Field, field_validator
 from torch import Tensor as TorchTensor
 
 if TYPE_CHECKING:
@@ -60,9 +61,9 @@ class MixtureDensityNetwork(nn.Module):
         bn_after_act: bool = False,
     ) -> None:
         super().__init__()
-        self.input_dim: int = input_dim
-        self.output_dim: int = output_dim
-        self.n_components: int = n_components
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.n_components = n_components
 
         if isinstance(hidden_dims, int):
             hidden_dims = [hidden_dims]
@@ -105,7 +106,7 @@ class MixtureDensityNetwork(nn.Module):
         Returns
         -------
         log_pi : Tensor of shape (batch_size, n_components)
-            Log of mixture weights.
+            Log mixture weights (log probabilities).
         mu : Tensor of shape (batch_size, n_components, output_dim)
             Component means (i.e., centers).
         sigma : Tensor of shape (batch_size, n_components)
@@ -134,11 +135,10 @@ class MixtureDensityNetwork(nn.Module):
             Samples from the mixture distribution.
         """
         log_pi, mu, sigma = self.forward(x)
-        pi = log_pi.exp()  # Convert log probabilities to probabilities
         batch_size = x.shape[0]
 
         # Vectorized sampling
-        component_dist = torch.distributions.Categorical(pi)
+        component_dist = torch.distributions.Categorical(logits=log_pi)
         component_idxs = component_dist.sample((n_samples,)).T  # (B, N)
 
         batch_idxs = (
@@ -166,7 +166,8 @@ class MixtureDensityNetwork(nn.Module):
         x : Tensor of shape (batch_size, input_dim)
             Input tensor.
 
-        inference_type : {"sample_mean", "sample_median", "weighted_mean", "argmax_mean"}
+        inference_type : {"sample_mean", "sample_median", "weighted_mean", \
+"argmax_mean"}
             Type of prediction to generate:
             - "sample_mean":
                 Mean of samples drawn from the mixture distribution.
@@ -189,7 +190,7 @@ class MixtureDensityNetwork(nn.Module):
         -------
         preds : Tensor of shape (batch_size, output_dim)
             Predicted values based on the selected inference type.
-        """  # noqa: W505, E501
+        """
         if inference_type in ("sample_mean", "sample_median"):
             samples = self.generate_samples(x, n_samples=n_samples)  # (B, N, D_out)
             return (
@@ -199,21 +200,21 @@ class MixtureDensityNetwork(nn.Module):
             )  # (B, D_out)
 
         log_pi, mu, _ = self.forward(x)
-        pi = log_pi.exp()  # Convert log probabilities to probabilities
 
         if inference_type == "weighted_mean":
             # Weighted average of all component means, E[Y|X=x]
+            pi = log_pi.exp()
             return torch.sum(pi.unsqueeze(-1) * mu, dim=1)
         else:
             # inference_type == "argmax_mean"
             # Mean of the most probable component
-            most_probable_idxs = pi.argmax(dim=-1)  # (B,)
+            most_probable_idxs = log_pi.argmax(dim=-1)  # (B,)
             batch_idxs = torch.arange(most_probable_idxs.shape[0], device=x.device)
             return mu[batch_idxs, most_probable_idxs]
 
     @torch.inference_mode()
     def predict_quantiles(
-        self, x: TorchTensor, quantiles: ArrayLike, n_samples: int = 100
+        self, x: TorchTensor, quantiles: ArrayLike[float], n_samples: int = 100
     ) -> dict[str, TorchTensor]:
         """Compute quantile predictions from the mixture distribution.
 
@@ -238,3 +239,35 @@ class MixtureDensityNetwork(nn.Module):
 
         samples = self.generate_samples(x, n_samples)  # (B, N, D_out)
         return {f"q_{q}": samples.quantile(q, dim=1) for q in quantiles}
+
+
+class MDNConfig(BaseModel, extra="forbid"):
+    """Configuration for MDN model architecture."""
+
+    input_dim: int = Field(..., gt=0, description="Dimension of input features")
+    hidden_dims: list[int] = Field(..., description="Hidden layer dimensions")
+    output_dim: int = Field(..., gt=0, description="Dimension of output targets")
+    n_components: int = Field(..., gt=0, description="Number of mixture components")
+    activation_type: str = Field(..., description="Activation function name")
+    bn_after_act: bool = Field(
+        default=False, description="Apply BatchNorm after activations."
+    )
+
+    @field_validator("hidden_dims", mode="before")
+    @classmethod
+    def ensure_hidden_dims_list(cls, v: list[int] | int) -> list[int]:
+        """Ensure `hidden_dims` is always a list of integers."""
+        if isinstance(v, int):
+            return [v]
+        return v
+
+    def create_model(self) -> MixtureDensityNetwork:
+        """Create Mixture Density Network model based on the configuration."""
+        return MixtureDensityNetwork(
+            input_dim=self.input_dim,
+            hidden_dims=self.hidden_dims,
+            output_dim=self.output_dim,
+            n_components=self.n_components,
+            activation_type=self.activation_type,
+            bn_after_act=self.bn_after_act,
+        )

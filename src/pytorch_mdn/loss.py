@@ -19,7 +19,7 @@ def mdn_loss(
     Parameters
     ----------
     log_pi : Tensor of shape (batch_size, n_components)
-        Log of mixture weights.
+        Log mixture weights (log probabilities).
     mu : Tensor of shape (batch_size, n_components, output_dim)
         Component means.
     sigma : Tensor of shape (batch_size, n_components)

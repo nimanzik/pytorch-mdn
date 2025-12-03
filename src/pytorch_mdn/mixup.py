@@ -11,11 +11,11 @@ if TYPE_CHECKING:
     from torch import Tensor as TorchTensor
 
 
-class BaseMixUpConfig(BaseModel, ABC):
-    """Base class for all MixUp configurations."""
+class BaseMixup(ABC):
+    """Base class for all MixUp implementations."""
 
     @abstractmethod
-    def apply_mixup(
+    def __call__(
         self, x: TorchTensor, y: TorchTensor
     ) -> tuple[TorchTensor, TorchTensor]:
         """Apply MixUp to input and target tensors.
@@ -36,27 +36,24 @@ class BaseMixUpConfig(BaseModel, ABC):
         """
         ...
 
+
+class RandomMixup(BaseMixup):
+    """Random MixUp implementation.
+
+    Parameters
+    ----------
+    alpha : float
+        Beta-distribution parameter for lambda sampling. Must be > 0.
+    seed : int or None, default=None
+        Random seed for reproducibility.
+    """
+
+    def __init__(self, alpha: float, seed: int | None = None) -> None:
+        self.alpha = alpha
+        self.seed = seed
+        self._rng = np.random.default_rng(seed=seed)
+
     def __call__(
-        self, x: TorchTensor, y: TorchTensor
-    ) -> tuple[TorchTensor, TorchTensor]:
-        return self.apply_mixup(x, y)
-
-
-class RandomMixUpConfig(BaseMixUpConfig, extra="forbid"):
-    """Configuration for random MixUp augmentation."""
-
-    type: Literal["random"] = "random"
-    alpha: float = Field(
-        ..., gt=0, description="Beta-distribution parameter for lambda sampling"
-    )
-    seed: int | None = Field(
-        default=None, description="Random seed for reproducibility"
-    )
-
-    def model_post_init(self, _) -> None:
-        self._rng = np.random.default_rng(seed=self.seed)
-
-    def apply_mixup(
         self, x: TorchTensor, y: TorchTensor
     ) -> tuple[TorchTensor, TorchTensor]:
         """Apply random MixUp to input and target tensors."""
@@ -72,33 +69,39 @@ class RandomMixUpConfig(BaseMixUpConfig, extra="forbid"):
         return x_mixed, y_mixed
 
 
-class KDEMixUpConfig(BaseMixUpConfig, extra="forbid"):
-    """Configuration for KDE-based MixUp augmentation.
+class KDEMixup(BaseMixup):
+    """KDE-guided MixUp implementation.
 
-    Uses kernel density estimation to find similar samples in *target space*.
+    Parameters
+    ----------
+    bandwidth : float
+        Kernel bandwidth.
+    alpha : float
+        Beta-distribution parameter for lambda sampling. Must be > 0.
+    kernel : {"gaussian", "tophat", "epanechnikov"}, default="gaussian"
+        Kernel type to use.
+    metric : {"euclidean", "cosine", "manhattan"}, default="euclidean"
+        Metric to use for distance computation.
+    seed : int or None, default=None
+        Random seed for reproducibility.
     """
 
-    type: Literal["kde"] = "kde"
-    bandwidth: float = Field(
-        ..., description="Kernel bandwidth or method to estimate it"
-    )
-    kernel: Literal["gaussian", "tophat", "epanechnikov"] = Field(
-        default="gaussian", description="Kernel type to use"
-    )
-    metric: Literal["euclidean", "cosine", "manhattan"] = Field(
-        default="euclidean", description="Metric to use for distance computation"
-    )
-    alpha: float = Field(
-        ..., gt=0, description="Beta-distribution parameter for lambda sampling"
-    )
-    seed: int | None = Field(
-        default=None, description="Random seed for reproducibility"
-    )
+    def __init__(
+        self,
+        bandwidth: float,
+        alpha: float,
+        kernel: Literal["gaussian", "tophat", "epanechnikov"] = "gaussian",
+        metric: Literal["euclidean", "cosine", "manhattan"] = "euclidean",
+        seed: int | None = None,
+    ) -> None:
+        self.bandwidth = bandwidth
+        self.alpha = alpha
+        self.kernel = kernel
+        self.metric = metric
+        self.seed = seed
+        self._rng = np.random.default_rng(seed=seed)
 
-    def model_post_init(self, _) -> None:
-        self._rng = np.random.default_rng(seed=self.seed)
-
-    def apply_mixup(
+    def __call__(
         self, x: TorchTensor, y: TorchTensor
     ) -> tuple[TorchTensor, TorchTensor]:
         """Apply KDE-guided MixUp to input and target tensors.
@@ -133,7 +136,7 @@ class KDEMixUpConfig(BaseMixUpConfig, extra="forbid"):
 
         Notes
         -----
-        - Data must be in sklearn format: NumPy array of shape
+        - Data must be in sklearn format, i.e., a NumPy array of shape
           (n_samples, n_features) or (n_samples, n_targets).
 
         - From the C-Mixup paper (https://arxiv.org/abs/2210.05775):
@@ -144,8 +147,8 @@ class KDEMixUpConfig(BaseMixUpConfig, extra="forbid"):
           probability P((xj , yj) | (xi, yi)) for another (xj , yj) example
           to be mixed.*
 
-        - When fitting KDE on single samples, if bandwidth is a method (i.e.,
-          string), sklearn falls back to the default value of 1.0. That's why
+        - When fitting KDE on single samples, if bandwidth is a method
+          (string), sklearn falls back to the default value of 1.0. That's why
           'scott' and 'silverman' are not used here.
         """
         batch_size = data.shape[0]
@@ -169,5 +172,68 @@ class KDEMixUpConfig(BaseMixUpConfig, extra="forbid"):
         return np.array(mixup_idxs)
 
 
+class BaseMixupConfig(BaseModel, ABC):
+    """Base class for all MixUp configurations."""
+
+    @abstractmethod
+    def create_mixup(self) -> BaseMixup:
+        """Convert configuration to MixUp instance.
+
+        Returns
+        -------
+        BaseMixup
+            MixUp instance created from this configuration.
+        """
+        ...
+
+
+class RandomMixupConfig(BaseMixupConfig, extra="forbid"):
+    """Configuration for random MixUp augmentation."""
+
+    type: Literal["random"] = "random"
+    alpha: float = Field(
+        ..., gt=0, description="Beta-distribution parameter for lambda sampling"
+    )
+    seed: int | None = Field(
+        default=None, description="Random seed for reproducibility"
+    )
+
+    def create_mixup(self) -> RandomMixup:
+        """Convert configuration to RandomMixup instance."""
+        return RandomMixup(alpha=self.alpha, seed=self.seed)
+
+
+class KDEMixupConfig(BaseMixupConfig, extra="forbid"):
+    """Configuration for KDE-based MixUp augmentation.
+
+    Uses kernel density estimation to find similar samples in *target space*.
+    """
+
+    type: Literal["kde"] = "kde"
+    bandwidth: float = Field(..., description="Kernel bandwidth")
+    kernel: Literal["gaussian", "tophat", "epanechnikov"] = Field(
+        default="gaussian", description="Kernel type to use"
+    )
+    metric: Literal["euclidean", "cosine", "manhattan"] = Field(
+        default="euclidean", description="Metric to use for distance computation"
+    )
+    alpha: float = Field(
+        ..., gt=0, description="Beta-distribution parameter for lambda sampling"
+    )
+    seed: int | None = Field(
+        default=None, description="Random seed for reproducibility"
+    )
+
+    def create_mixup(self) -> KDEMixup:
+        """Convert configuration to KDEMixup instance."""
+        return KDEMixup(
+            bandwidth=self.bandwidth,
+            alpha=self.alpha,
+            kernel=self.kernel,
+            metric=self.metric,
+            seed=self.seed,
+        )
+
+
 # Union type for all mixup configs
-MixUpConfig = RandomMixUpConfig | KDEMixUpConfig
+MixupConfig = RandomMixupConfig | KDEMixupConfig
