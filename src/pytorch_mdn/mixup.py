@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
-from pydantic import BaseModel, Field
 from sklearn.neighbors import KernelDensity
 
 if TYPE_CHECKING:
@@ -170,70 +169,3 @@ class KDEMixup(BaseMixup):
             mixup_idxs.append(mixup_idx)
 
         return np.array(mixup_idxs)
-
-
-class BaseMixupConfig(BaseModel, ABC):
-    """Base class for all MixUp configurations."""
-
-    @abstractmethod
-    def create_mixup(self) -> BaseMixup:
-        """Convert configuration to MixUp instance.
-
-        Returns
-        -------
-        BaseMixup
-            MixUp instance created from this configuration.
-        """
-        ...
-
-
-class RandomMixupConfig(BaseMixupConfig, extra="forbid"):
-    """Configuration for random MixUp augmentation."""
-
-    type: Literal["random"] = "random"
-    alpha: float = Field(
-        ..., gt=0, description="Beta-distribution parameter for lambda sampling"
-    )
-    seed: int | None = Field(
-        default=None, description="Random seed for reproducibility"
-    )
-
-    def create_mixup(self) -> RandomMixup:
-        """Convert configuration to RandomMixup instance."""
-        return RandomMixup(alpha=self.alpha, seed=self.seed)
-
-
-class KDEMixupConfig(BaseMixupConfig, extra="forbid"):
-    """Configuration for KDE-based MixUp augmentation.
-
-    Uses kernel density estimation to find similar samples in *target space*.
-    """
-
-    type: Literal["kde"] = "kde"
-    bandwidth: float = Field(..., description="Kernel bandwidth")
-    kernel: Literal["gaussian", "tophat", "epanechnikov"] = Field(
-        default="gaussian", description="Kernel type to use"
-    )
-    metric: Literal["euclidean", "cosine", "manhattan"] = Field(
-        default="euclidean", description="Metric to use for distance computation"
-    )
-    alpha: float = Field(
-        ..., gt=0, description="Beta-distribution parameter for lambda sampling"
-    )
-    seed: int | None = Field(
-        default=None, description="Random seed for reproducibility"
-    )
-
-    def create_mixup(self) -> KDEMixup:
-        """Convert configuration to KDEMixup instance."""
-        return KDEMixup(
-            bandwidth=self.bandwidth,
-            alpha=self.alpha,
-            kernel=self.kernel,
-            metric=self.metric,
-            seed=self.seed,
-        )
-
-
-# Union type for all mixup configs
-MixupConfig = RandomMixupConfig | KDEMixupConfig
