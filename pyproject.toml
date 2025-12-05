@@ -21,8 +21,14 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "pre-commit>=4.3.0",
+    "pytest>=9.0.1",
     "ruff>=0.14.3",
     "ty>=0.0.1a25",
+]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::UserWarning:torch.autograd.graph",
 ]
 
 [tool.ty.rules]

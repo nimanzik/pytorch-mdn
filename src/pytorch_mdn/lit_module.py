@@ -11,8 +11,7 @@ if TYPE_CHECKING:
 
     from torch import Tensor as TorchTensor
 
-    from .mixup import MixupConfig
-    from .model import MDNConfig
+    from .configs import MDNConfig, MixupConfig
 
 
 class MDNLitModule(LightningModule):

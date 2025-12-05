@@ -5,29 +5,13 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 import torch
 import torch.nn as nn
-from pydantic import BaseModel, Field, field_validator
 from torch import Tensor as TorchTensor
 
+from .activations import ElevatedELU
+from .backbone import MLPBackbone
+
 if TYPE_CHECKING:
-    from numpy.typing import ArrayLike
-
-
-ACTIVATION_FUNCTIONS = {
-    "relu": nn.ReLU,
-    "gelu": nn.GELU,
-    "mish": nn.Mish,
-    "silu": nn.SiLU,
-}
-
-
-class ElevatedELU(nn.ELU):
-    """ELU activation shifted upwards by 1 to get strictly positive outputs."""
-
-    def __init__(self):
-        super().__init__(alpha=1.0)
-
-    def forward(self, input: TorchTensor) -> TorchTensor:
-        return super().forward(input) + 1.0
+    from collections.abc import Sequence
 
 
 class MixtureDensityNetwork(nn.Module):
@@ -36,20 +20,25 @@ class MixtureDensityNetwork(nn.Module):
     Parameters
     ----------
     input_dim : int
-        Dimension of input features
-    hidden_dims : list[int] | int
-        Hidden layer dimensions. Can be a single int or list of ints
+        Dimension of input features.
+    hidden_dims : list[int] or int
+        Hidden layer dimensions. Can be a single int or list of ints.
     output_dim : int
-        Dimension of output targets
+        Dimension of output targets.
     n_components : int
-        Number of mixture components in the output distribution
+        Number of mixture components in the output distribution.
     activation_type : {"gelu", "relu", "mish", "silu"}
         Activation function name.
-    bn_after_act : bool, default=False
-        Whether to apply batch normalization after activation functions.
+    norm_type : {"batch", "layer"} or None, default=None
+        Type of normalisation layer to use. "batch" for batch normalisation,
+        "layer" for layer normalisation, or None for no normalisation.
+    norm_after_act : bool, default=False
+        Whether to apply normalisation after activation functions. If False,
+        normalisation is applied before activation.
+    dropout_rate : float, default=0.0
+        Dropout probability for regularisation. Must be between 0.0 and 1.0.
+        No dropout is applied if 0.0.
     """
-
-    # ToDo: Add option for different activation functions for mu layer
 
     def __init__(
         self,
@@ -58,7 +47,9 @@ class MixtureDensityNetwork(nn.Module):
         output_dim: int,
         n_components: int,
         activation_type: str,
-        bn_after_act: bool = False,
+        norm_type: Literal["batch", "layer"] | None = None,
+        norm_after_act: bool = False,
+        dropout_rate: float = 0.0,
     ) -> None:
         super().__init__()
         self.input_dim = input_dim
@@ -69,30 +60,24 @@ class MixtureDensityNetwork(nn.Module):
             hidden_dims = [hidden_dims]
         self.hidden_dims: list[int] = hidden_dims
 
-        activation_fn = ACTIVATION_FUNCTIONS.get(activation_type.lower(), nn.GELU)
+        # Create MLP backbone
+        self.backbone = MLPBackbone(
+            input_dim=input_dim,
+            hidden_dims=hidden_dims,
+            activation_type=activation_type,
+            norm_type=norm_type,
+            norm_after_act=norm_after_act,
+            dropout_rate=dropout_rate,
+        )
 
-        layers = []
-        prev_dim = self.input_dim
-        for hidden_dim in self.hidden_dims:
-            block = [nn.Linear(prev_dim, hidden_dim), activation_fn()]
-            if bn_after_act:
-                block.append(nn.BatchNorm1d(hidden_dim))
-            else:
-                block.insert(1, nn.BatchNorm1d(hidden_dim))
-
-            layers.extend(block)
-            prev_dim = hidden_dim
-
-        self.backbone = nn.Sequential(*layers)
+        backbone_output_dim = self.backbone.output_dim
 
         self.pi_layer = nn.Sequential(
-            nn.Linear(prev_dim, self.n_components), nn.LogSoftmax(dim=-1)
+            nn.Linear(backbone_output_dim, self.n_components), nn.LogSoftmax(dim=-1)
         )
-        self.mu_layer = nn.Sequential(
-            nn.Linear(prev_dim, self.n_components * output_dim), nn.Softplus()
-        )
+        self.mu_layer = nn.Linear(backbone_output_dim, self.n_components * output_dim)
         self.sigma_layer = nn.Sequential(
-            nn.Linear(prev_dim, self.n_components), ElevatedELU()
+            nn.Linear(backbone_output_dim, self.n_components), ElevatedELU()
         )
 
     def forward(self, x: TorchTensor) -> tuple[TorchTensor, TorchTensor, TorchTensor]:
@@ -108,7 +93,7 @@ class MixtureDensityNetwork(nn.Module):
         log_pi : Tensor of shape (batch_size, n_components)
             Log mixture weights (log probabilities).
         mu : Tensor of shape (batch_size, n_components, output_dim)
-            Component means (i.e., centers).
+            Component means (i.e., centres).
         sigma : Tensor of shape (batch_size, n_components)
             Component standard deviations.
         """
@@ -214,7 +199,7 @@ class MixtureDensityNetwork(nn.Module):
 
     @torch.inference_mode()
     def predict_quantiles(
-        self, x: TorchTensor, quantiles: ArrayLike[float], n_samples: int = 100
+        self, x: TorchTensor, quantiles: Sequence[float], n_samples: int = 100
     ) -> dict[str, TorchTensor]:
         """Compute quantile predictions from the mixture distribution.
 
@@ -222,52 +207,20 @@ class MixtureDensityNetwork(nn.Module):
         ----------
         x : Tensor of shape (batch_size, input_dim)
             Input tensor.
-        quantiles : list[float]
-            List of quantile values to compute, each between 0 and 1.
+        quantiles : sequence of float
+            Sequence of quantile values to compute, each between 0 and 1.
         n_samples : int, default=100
             Number of samples to draw for quantile estimation.
 
         Returns
         -------
         results : dict[str, Tensor]
-            Dictionary with keys as "q_{quantile}" and values as Tensors of
+            Dictionary with keys as "q_{quantile}" and values as tensors of
             shape (batch_size, output_dim) containing the estimated quantiles.
         """
-        quantiles = np.asarray(quantiles)
-        if not np.all((quantiles > 0) & (quantiles < 1)):
+        quantiles_arr = np.asarray(quantiles)
+        if not np.all((quantiles_arr > 0) & (quantiles_arr < 1)):
             raise ValueError("Quantiles must be between 0 and 1.")
 
         samples = self.generate_samples(x, n_samples)  # (B, N, D_out)
         return {f"q_{q}": samples.quantile(q, dim=1) for q in quantiles}
-
-
-class MDNConfig(BaseModel, extra="forbid"):
-    """Configuration for MDN model architecture."""
-
-    input_dim: int = Field(..., gt=0, description="Dimension of input features")
-    hidden_dims: list[int] = Field(..., description="Hidden layer dimensions")
-    output_dim: int = Field(..., gt=0, description="Dimension of output targets")
-    n_components: int = Field(..., gt=0, description="Number of mixture components")
-    activation_type: str = Field(..., description="Activation function name")
-    bn_after_act: bool = Field(
-        default=False, description="Apply BatchNorm after activations."
-    )
-
-    @field_validator("hidden_dims", mode="before")
-    @classmethod
-    def ensure_hidden_dims_list(cls, v: list[int] | int) -> list[int]:
-        """Ensure `hidden_dims` is always a list of integers."""
-        if isinstance(v, int):
-            return [v]
-        return v
-
-    def create_model(self) -> MixtureDensityNetwork:
-        """Create Mixture Density Network model based on the configuration."""
-        return MixtureDensityNetwork(
-            input_dim=self.input_dim,
-            hidden_dims=self.hidden_dims,
-            output_dim=self.output_dim,
-            n_components=self.n_components,
-            activation_type=self.activation_type,
-            bn_after_act=self.bn_after_act,
-        )
