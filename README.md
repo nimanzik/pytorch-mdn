@@ -70,7 +70,7 @@ predictions = model.predict(x, inference_type="sample_median")
 samples = model.generate_samples(x, n_samples=1_000)
 
 # Predict specific quantiles
-quantiles = model.predict_quantiles(x, quantiles={0.05, 0.5, 0.95})
+quantiles = model.predict_quantiles(x, quantiles=[0.05, 0.5, 0.95])
 ```
 
 ## Requirements

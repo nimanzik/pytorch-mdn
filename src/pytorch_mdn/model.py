@@ -218,9 +218,9 @@ class MixtureDensityNetwork(nn.Module):
             Dictionary with keys as "q_{quantile}" and values as tensors of
             shape (batch_size, output_dim) containing the estimated quantiles.
         """
-        quantiles_arr = np.asarray(quantiles)
+        quantiles_arr = np.asarray(list(quantiles))
         if not np.all((quantiles_arr > 0) & (quantiles_arr < 1)):
             raise ValueError("Quantiles must be between 0 and 1.")
 
         samples = self.generate_samples(x, n_samples)  # (B, N, D_out)
-        return {f"q_{q}": samples.quantile(q, dim=1) for q in quantiles}
+        return {f"q_{q}": samples.quantile(q, dim=1) for q in quantiles_arr}
