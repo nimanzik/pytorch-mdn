@@ -30,6 +30,3 @@ dev = [
 filterwarnings = [
     "ignore::UserWarning:torch.autograd.graph",
 ]
-
-[tool.ty.rules]
-unresolved-attribute = "ignore"
